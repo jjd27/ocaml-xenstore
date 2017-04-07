@@ -158,7 +158,7 @@ module Client = functor(IO: IO with type 'a t = 'a) -> struct
 
   (* Represents a single acive connection to a server *)
   type client = {
-    transport: IO.channel;
+    mutable transport: IO.channel;
     ps: PS.stream;
     rid_to_wakeup: (int32, Xs_protocol.t Task.u) Hashtbl.t;
     mutable dispatcher_thread: Thread.t option;
@@ -175,6 +175,7 @@ module Client = functor(IO: IO with type 'a t = 'a) -> struct
       
     mutable extra_watch_callback: ((string * string) -> unit);
     m: Mutex.t;
+    transport_m: Mutex.t;
   }
 
   type handle = client Xs_handle.t
@@ -186,14 +187,25 @@ module Client = functor(IO: IO with type 'a t = 'a) -> struct
 
   let handle_exn t e =
     error "Caught: %s\n%!" (Printexc.to_string e);
-    begin match e with
+    let reraise = begin match e with
       | Xs_protocol.Response_parser_failed x ->
       (* Lwt_io.hexdump Lwt_io.stderr x *)
-         ()
-      | _ -> ()
-    end;
-    t.dispatcher_shutting_down <- true;
-    raise e
+         true
+      | Xs_protocol.EOF ->
+         error "xenstored channel down; reconnecting...";
+         with_mutex t.transport_m (fun () ->
+           (* Close existing channel, best-effort *)
+           begin try IO.destroy t.transport with _ -> () end;
+           (* Create a new channel and carry on *)
+           t.transport <- IO.create ()
+         );
+         false
+      | _ -> true
+    end in
+    if reraise then begin
+      t.dispatcher_shutting_down <- true;
+      raise e
+    end
 
   let enqueue_watch t event =
     with_mutex t.incoming_watches_m
@@ -205,7 +217,16 @@ module Client = functor(IO: IO with type 'a t = 'a) -> struct
       )
 
   let rec dispatcher t =
-    let pkt = try recv_one t with e -> handle_exn t e in
+    let rec get_packet () =
+        try
+            recv_one t
+        with e ->
+            handle_exn t e;
+            (* If handle_exn didn't re-raise the exception, try again after a short delay. *)
+            Unix.sleep 1;
+            get_packet ()
+    in
+    let pkt = get_packet () in
     match get_ty pkt with
       | Op.Watchevent  ->
         begin match Unmarshal.list pkt with
@@ -276,6 +297,7 @@ module Client = functor(IO: IO with type 'a t = 'a) -> struct
 
       extra_watch_callback = (fun _ -> ());
       m = Mutex.create ();
+      transport_m = Mutex.create ();
     } in
     t.dispatcher_thread <- Some (Thread.create dispatcher t);
     t.watch_callback_thread <- Some (Thread.create dequeue_watches t);
