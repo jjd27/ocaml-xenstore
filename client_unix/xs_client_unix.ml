@@ -186,7 +186,7 @@ module Client = functor(IO: IO with type 'a t = 'a) -> struct
   let send_one t = PS.send t.ps
 
   let handle_exn t e =
-    error "Caught: %s\n%!" (Printexc.to_string e);
+    error "Caught: %s (backtrace: %s)\n%!" (Printexc.to_string e) (Printexc.get_backtrace ());
     let reraise = begin match e with
       | Xs_protocol.Response_parser_failed x ->
       (* Lwt_io.hexdump Lwt_io.stderr x *)
