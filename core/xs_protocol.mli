@@ -108,6 +108,7 @@ end
 
 exception Unknown_xenstore_operation of int32
 exception Response_parser_failed of string
+exception EOF
 
 type ('a, 'b) result =
 	| Ok of 'a
